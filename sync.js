@@ -32,14 +32,23 @@ const HEADER_HEIGHT = num("HEADER_HEIGHT", 50);
 // comma-separated list to suit how you actually track things.
 const STATUS_OPTIONS = (
   process.env.STATUS_OPTIONS ||
-  "Backlog,Playing,Ongoing,Beaten,Platinum,Dropped"
+  "Backlog,Playing,Ongoing,Beaten,Platinum,100%,Dropped"
 )
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
 // Statuses that mean "done with it" — these sink to the bottom of the play order.
-const DONE_STATUSES = ["Beaten", "Platinum", "Dropped"];
+const DONE_STATUSES = ["Beaten", "Platinum", "100%", "Dropped"];
+
+// Source dropdown. PSN fills in Digital and PS Plus on its own; the rest are
+// for the games it has no record of, entered by hand.
+const SOURCE_OPTIONS = (
+  process.env.SOURCE_OPTIONS || "Digital,Disc,PS Plus,Gift,Free,Borrowed,Old"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 // Half steps, so a 3.5 is expressible.
 const RATING_OPTIONS = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5];
@@ -57,6 +66,23 @@ const TROPHY_API = "https://m.np.playstation.com/api/trophy/v1";
 const BANNER_HEIGHT = num("BANNER_HEIGHT", 28);
 // How many cells the timestamp banner spans across the top.
 const BANNER_SPAN = num("BANNER_SPAN", 5);
+// When two rows turn out to be the same game, fold the stale one into the live
+// one: copy across anything you entered that the live row lacks, then delete
+// it. FOLD_STALE=0 switches this off and leaves stale rows for you to handle.
+const FOLD_STALE = process.env.FOLD_STALE !== "0";
+
+// Cover and Game stay on screen while scrolling sideways through the columns.
+const FROZEN_COLUMNS = (() => {
+  // Unlike the other sizes, 0 is meaningful here: it turns the freeze off.
+  const raw = process.env.FROZEN_COLUMNS;
+  const v = Number(raw);
+  return raw !== undefined && raw !== "" && Number.isInteger(v) && v >= 0 ? v : 2;
+})();
+
+// Google's API leaves out any field whose value is 0, so the first tab's id,
+// or a range starting at row 0, comes back missing rather than as 0. Comparing
+// those fields directly to 0 silently never matches.
+const at = (v) => v ?? 0;
 
 // HowLongToBeat is the slow, flaky step. HLTB_ENABLED=0 skips it entirely.
 const HLTB_ENABLED = process.env.HLTB_ENABLED !== "0";
@@ -235,7 +261,7 @@ function gameCell(name, conceptId) {
 // outright beats having it through the subscription. Returns "" when PSN has
 // no record either way — disc copies, other accounts, PS3-era games.
 function sourceLabel(g) {
-  if (g.service === "none_purchased" || g.owned) return "Purchased";
+  if (g.service === "none_purchased" || g.owned) return "Digital";
   if (g.service === "ps_plus" || g.plusClaim) return "PS Plus";
   return "";
 }
@@ -326,6 +352,7 @@ async function pullTrophyTitles(auth) {
       if (!key) continue;
       games.set(key, {
         name: t.trophyTitleName,
+        trophyName: t.trophyTitleName,
         platform: t.trophyTitlePlatform || "",
         progress: typeof t.progress === "number" ? t.progress : "",
         playtime: "",
@@ -451,6 +478,9 @@ async function enrichPlayed(auth, games) {
           continue;
         }
         merges.push([t.name, targetName]);
+        // Kept so a stale row filed under this name can later be traced back
+        // to the game it now belongs to.
+        if (target) (target.aliases ||= []).push(t.name);
         key = existingKey;
         break;
       }
@@ -523,6 +553,22 @@ async function enrichPlayed(auth, games) {
           `first ${g.firstPlayed || "?"}, last ${g.lastPlayed || "?"}`
       );
     }
+  }
+}
+
+// Preferring the plainer name can hand two different games the same one: the
+// PS4 and PS5 trophy lists for Minecraft both became "Minecraft". Where that
+// happens, each goes back to its own trophy-list name, which tells them apart.
+function resolveNameClashes(games) {
+  const byName = new Map();
+  for (const g of games.values()) {
+    const k = norm(g.name);
+    if (!byName.has(k)) byName.set(k, []);
+    byName.get(k).push(g);
+  }
+  for (const group of byName.values()) {
+    if (group.length < 2) continue;
+    for (const g of group) if (g.trophyName) g.name = g.trophyName;
   }
 }
 
@@ -657,7 +703,7 @@ async function getSheetId(sheets, spreadsheetId) {
         `Rename a tab to "${SHEET_TAB}" or set SHEET_TAB to one of these.`
     );
   }
-  return found.properties.sheetId;
+  return at(found.properties.sheetId);
 }
 
 async function readSheet(sheets) {
@@ -687,7 +733,7 @@ async function readSheet(sheets) {
   } else {
     for (const h of ALL_HEADERS) if (!header.includes(h)) header.push(h);
   }
-  return { spreadsheetId, header, body };
+  return { spreadsheetId, header, body, headerRow };
 }
 
 function existingHoursMap(header, body) {
@@ -703,7 +749,7 @@ function existingHoursMap(header, body) {
   return map;
 }
 
-async function writeSheet(sheets, spreadsheetId, header, body, games) {
+async function writeSheet(sheets, spreadsheetId, sheetId, headerRow, header, body, games) {
   const idx = {};
   ALL_HEADERS.forEach((h) => (idx[h] = header.indexOf(h)));
 
@@ -774,26 +820,11 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     const key = norm(gameNameFromCell(r[gameCol]));
     if (!key) continue;
     if (rowByKey.has(key)) {
-      const names = collisions.get(key) || [
-        gameNameFromCell(rowByKey.get(key)[gameCol]),
-      ];
-      names.push(gameNameFromCell(r[gameCol]));
-      collisions.set(key, names);
+      const group = collisions.get(key) || [rowByKey.get(key)];
+      group.push(r);
+      collisions.set(key, group);
     }
     rowByKey.set(key, r);
-  }
-  // Rows that already exist can't be merged for you: each may carry its own
-  // notes and rating, and picking a winner isn't the script's call. Only one of
-  // each pair gets updated from here on, so name them plainly.
-  if (collisions.size) {
-    console.warn(
-      `\n${collisions.size} pair(s) of rows now resolve to the same game. ` +
-        `Only one of each is being kept up to date — delete the other by hand:`
-    );
-    for (const names of collisions.values()) {
-      console.warn(`  - ${names.join("   ==   ")}`);
-    }
-    console.warn("");
   }
 
   // The trophy-set id is the stable identifier, so it wins where the sheet has
@@ -813,11 +844,140 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
   }
 
   // Rows left untouched are usually the far half of a pair that has just been
-  // merged under one identity. They are never deleted automatically — a row may
-  // carry notes you want — but they are worth naming.
-  const orphans = body.filter(
+  // merged under one identity: a store name the bridge folded into a trophy
+  // set, or a twin that normalises to the same name as a live row.
+  const allOrphans = body.filter(
     (r) => !matched.has(r) && norm(gameNameFromCell(r[gameCol]))
   );
+
+  // Every name a live row answers to: its current name, its trophy-list name,
+  // and any store name merged into it. A stale row filed under one of these is
+  // a copy of that game.
+  const liveByName = new Map();
+  for (const [key, g] of games) {
+    const live = rowFor(key, g);
+    if (!live) continue;
+    for (const n of [g.name, g.trophyName, ...(g.aliases || [])]) {
+      const k = norm(n);
+      if (!k) continue;
+      if (!liveByName.has(k)) liveByName.set(k, new Set());
+      liveByName.get(k).add(live);
+    }
+  }
+
+  // What can be carried across. Hide is deliberately absent: a stale copy is
+  // often hidden precisely because it was a duplicate, and copying that tick
+  // would hide the live game.
+  const STRICT = ["Status", "Priority", "Rating", "Price paid", "Notes", GOAL_H];
+  const COPY = [...STRICT, "Source"];
+  const blank = (v) => v === undefined || v === null || String(v).trim() === "";
+
+  const folded = new Set();
+  const foldLog = [];
+  const heldBack = [];
+  const heldBackRows = new Set();
+  if (FOLD_STALE && headerRow === 1) {
+    for (const r of allOrphans) {
+      // A row that was ever stamped with a trophy-set id is a real game in its
+      // own right, not a duplicate; leave it.
+      if (psnIdCol !== -1 && !blank(r[psnIdCol])) continue;
+      const name = gameNameFromCell(r[gameCol]);
+      const twins = liveByName.get(norm(name));
+      if (!twins || twins.size === 0) continue;
+
+      const entered = COPY.filter((c) => idx[c] !== -1 && !blank(r[idx[c]]));
+      // With nothing entered there's nothing to lose, so any live twin will do.
+      // With entries, they need a single unambiguous home.
+      if (entered.length && twins.size !== 1) {
+        heldBack.push(`${name} (matches ${twins.size} live rows)`);
+        heldBackRows.add(r);
+        continue;
+      }
+      const live = [...twins][0];
+      pad(live);
+      const clashes = STRICT.filter(
+        (c) =>
+          idx[c] !== -1 &&
+          !blank(r[idx[c]]) &&
+          !blank(live[idx[c]]) &&
+          String(r[idx[c]]).trim() !== String(live[idx[c]]).trim()
+      );
+      if (clashes.length) {
+        heldBack.push(
+          `${name} (${clashes
+            .map((c) => `${c}: "${r[idx[c]]}" vs "${live[idx[c]]}"`)
+            .join(", ")})`
+        );
+        heldBackRows.add(r);
+        continue;
+      }
+      const carried = [];
+      for (const c of entered) {
+        if (blank(live[idx[c]])) {
+          live[idx[c]] = r[idx[c]];
+          carried.push(`${c}=${r[idx[c]]}`);
+        }
+      }
+      folded.add(r);
+      foldLog.push(
+        `${name}  ->  ${gameNameFromCell(live[gameCol])}` +
+          (carried.length ? `   (carried ${carried.join(", ")})` : "")
+      );
+    }
+  }
+
+  // Delete folded rows from the sheet itself before writing, so anything
+  // formatted by hand on the rows below moves up with its content. If the
+  // delete fails, write everything back as it was rather than shifting values
+  // out of line with their rows.
+  let keptBody = body;
+  if (folded.size) {
+    const gridRows = body
+      .map((r, i) => (folded.has(r) ? headerRow + 1 + i : -1))
+      .filter((i) => i >= 0)
+      .sort((a, b) => b - a);
+    try {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: gridRows.map((i) => ({
+            deleteDimension: {
+              range: { sheetId, dimension: "ROWS", startIndex: i, endIndex: i + 1 },
+            },
+          })),
+        },
+      });
+      keptBody = body.filter((r) => !folded.has(r));
+      console.log(`\nFolded ${folded.size} stale row(s) into their live copies:`);
+      for (const line of foldLog) console.log(`  - ${line}`);
+    } catch (e) {
+      folded.clear();
+      console.warn("Stale rows could not be removed, so none were folded:", e.message);
+    }
+  }
+  if (heldBack.length) {
+    console.warn(
+      `\n${heldBack.length} stale row(s) left alone because folding them would ` +
+        `overwrite something, or there's no single place to put it:`
+    );
+    for (const line of heldBack) console.warn(`  - ${line}`);
+  }
+
+  // Pairs still sharing a name after folding.
+  const stillColliding = [...collisions.values()]
+    .map((g) => g.filter((r) => !folded.has(r)))
+    .filter((g) => g.length > 1 && !g.some((r) => heldBackRows.has(r)));
+  if (stillColliding.length) {
+    console.warn(
+      `\n${stillColliding.length} pair(s) of rows resolve to the same game. ` +
+        `Only one of each is kept up to date:`
+    );
+    for (const g of stillColliding) {
+      console.warn(`  - ${g.map((r) => gameNameFromCell(r[gameCol])).join("   ==   ")}`);
+    }
+  }
+
+  const orphans = allOrphans.filter((r) => !folded.has(r) && !heldBackRows.has(r));
   if (orphans.length) {
     console.warn(
       `\n${orphans.length} row(s) matched no game in this sync and were left ` +
@@ -843,7 +1003,7 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
   const banner = pad([
     `Last synced: ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`,
   ]);
-  const finalValues = [banner, header, ...body, ...appended];
+  const finalValues = [banner, header, ...keptBody, ...appended];
 
   // Sort order is a formula, not a value, so it keeps reacting as you edit
   // Status and Priority by hand. Row numbers are only known now that the sheet
@@ -854,7 +1014,15 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
   if (sortCol !== -1 && statusCol !== -1 && priorityCol !== -1) {
     const s = colLetter(statusCol);
     const p = colLetter(priorityCol);
-    const done = DONE_STATUSES.map((x) => `$${s}{R}="${x}"`).join(",");
+    // Sheets reads a dropdown choice the way it reads typing, so "100%" can land
+    // as the number 1 formatted as a percentage rather than as text. Match both,
+    // or a 100% game would never sink.
+    const done = DONE_STATUSES.flatMap((x) => {
+      const test = [`$${s}{R}="${x}"`];
+      const pct = /^(\d+(?:\.\d+)?)%$/.exec(x);
+      if (pct) test.push(`$${s}{R}=${Number(pct[1]) / 100}`);
+      return test;
+    }).join(",");
     for (let i = 2; i < finalValues.length; i++) {
       const R = i + 1; // 1-based sheet row
       finalValues[i][sortCol] =
@@ -1010,11 +1178,15 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
     styleCol(t.header, ...CENTER);
   }
 
-  // Keep the header on screen while scrolling a few hundred rows.
+  // Keep the header on screen while scrolling down, and the cover and title on
+  // screen while scrolling across.
   requests.push({
     updateSheetProperties: {
-      properties: { sheetId, gridProperties: { frozenRowCount: 2 } },
-      fields: "gridProperties.frozenRowCount",
+      properties: {
+        sheetId,
+        gridProperties: { frozenRowCount: 2, frozenColumnCount: FROZEN_COLUMNS },
+      },
+      fields: "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
     },
   });
 
@@ -1053,28 +1225,36 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
       "sheets(properties.sheetId,conditionalFormats,basicFilter,merges,bandedRanges)",
   });
   const sheet = (meta.data.sheets || []).find(
-    (s) => s.properties.sheetId === sheetId
+    (s) => at(s.properties.sheetId) === sheetId
   );
 
-  // Merge the banner across the top. Re-merging an existing merge errors, so
-  // only touch it when the current merge doesn't already match.
-  const bannerWidth = Math.min(BANNER_SPAN, header.length);
+  // Merge the banner across the top. Sheets refuses to merge across the line
+  // between frozen and scrolling columns, so when columns are frozen the banner
+  // stays inside them — Cover and Game together are wide enough for it.
+  const bannerWidth = Math.min(
+    FROZEN_COLUMNS > 0 ? FROZEN_COLUMNS : BANNER_SPAN,
+    header.length
+  );
   const existingMerges = (sheet && sheet.merges) || [];
-  const bannerMerge = existingMerges.find((m) => m.startRowIndex === 0);
+  const bannerMerge = existingMerges.find((m) => at(m.startRowIndex) === 0);
   const bannerMatches =
     bannerMerge &&
-    bannerMerge.startColumnIndex === 0 &&
+    at(bannerMerge.startColumnIndex) === 0 &&
     bannerMerge.endColumnIndex === bannerWidth &&
     bannerMerge.endRowIndex === 1;
+  // Both halves go out on their own rather than in the main request. An old,
+  // wider banner merge has to be undone *before* the freeze is applied, since
+  // Sheets won't freeze a line through a merged cell; and the new merge goes
+  // last, so a merge Sheets rejects can't take the rest of the formatting down.
+  const unmergeFirst = [];
+  const mergeRequests = [];
   if (!bannerMatches) {
     if (bannerMerge) {
-      requests.push({
-        unmergeCells: {
-          range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
-        },
+      unmergeFirst.push({
+        unmergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 1 } },
       });
     }
-    requests.push({
+    mergeRequests.push({
       mergeCells: {
         range: {
           sheetId,
@@ -1207,6 +1387,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
 
   dropdown("Rating", RATING_OPTIONS);
   dropdown("Status", STATUS_OPTIONS);
+  dropdown("Source", SOURCE_OPTIONS);
 
   // Hidden is a checkbox. Ticking it drops the row out of the view via the
   // filter below; untick it, or clear the filter, to get the row back.
@@ -1262,11 +1443,31 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
     }
   }
 
+  if (unmergeFirst.length) {
+    try {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests: unmergeFirst },
+      });
+    } catch (e) {
+      console.warn("Old banner merge could not be removed:", e.message);
+    }
+  }
   if (requests.length) {
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId,
       requestBody: { requests },
     });
+  }
+  if (mergeRequests.length) {
+    try {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests: mergeRequests },
+      });
+    } catch (e) {
+      console.warn("Banner merge skipped:", e.message);
+    }
   }
 }
 
@@ -1289,16 +1490,19 @@ async function main() {
   const auth = await getAuth();
   const sheets = getSheetsClient();
 
-  const { spreadsheetId, header, body } = await readSheet(sheets);
+  const { spreadsheetId, header, body, headerRow } = await readSheet(sheets);
   const sheetId = await getSheetId(sheets, spreadsheetId);
   const knownHours = existingHoursMap(header, body);
 
   const games = await pullTrophyTitles(auth);
   await enrichPlayed(auth, games);
   await enrichPurchased(auth, games);
+  resolveNameClashes(games);
   await enrichHltb(games, knownHours);
 
-  const dataRowCount = await writeSheet(sheets, spreadsheetId, header, body, games);
+  const dataRowCount = await writeSheet(
+    sheets, spreadsheetId, sheetId, headerRow, header, body, games
+  );
   await applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCount);
 }
 

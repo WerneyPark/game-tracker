@@ -38,6 +38,26 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
           SHEET_TAB: ${{ vars.SHEET_TAB || 'Games' }}
           HLTB_ENABLED: ${{ vars.HLTB_ENABLED || '1' }}
+          # Optional settings, set under Settings > Secrets and variables >
+          # Actions > Variables. Anything left unset arrives empty and the
+          # script falls back to its default.
+          FOLD_STALE: ${{ vars.FOLD_STALE }}
+          TITLE_BRIDGE_ENABLED: ${{ vars.TITLE_BRIDGE_ENABLED }}
+          BRIDGE_BATCH: ${{ vars.BRIDGE_BATCH }}
+          BRIDGE_DELAY_MS: ${{ vars.BRIDGE_DELAY_MS }}
+          HLTB_DELAY_MS: ${{ vars.HLTB_DELAY_MS }}
+          STATUS_OPTIONS: ${{ vars.STATUS_OPTIONS }}
+          SOURCE_OPTIONS: ${{ vars.SOURCE_OPTIONS }}
+          PRICE_FORMAT: ${{ vars.PRICE_FORMAT }}
+          FROZEN_COLUMNS: ${{ vars.FROZEN_COLUMNS }}
+          COVER_MODE: ${{ vars.COVER_MODE }}
+          COVER_W: ${{ vars.COVER_W }}
+          GAME_W: ${{ vars.GAME_W }}
+          PLATFORM_W: ${{ vars.PLATFORM_W }}
+          ROW_HEIGHT: ${{ vars.ROW_HEIGHT }}
+          HEADER_HEIGHT: ${{ vars.HEADER_HEIGHT }}
+          BANNER_HEIGHT: ${{ vars.BANNER_HEIGHT }}
+          BANNER_SPAN: ${{ vars.BANNER_SPAN }}
 
       # A scheduled job that quietly stops working is worse than one that
       # breaks loudly. The NPSSO token expires roughly every two months, so
