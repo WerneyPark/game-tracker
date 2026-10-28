@@ -34,6 +34,7 @@ jobs:
       - run: node sync.js
         env:
           NPSSO: ${{ secrets.NPSSO }}
+          PSN_ONLINE_ID: ${{ vars.PSN_ONLINE_ID || secrets.PSN_ONLINE_ID }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
           SHEET_TAB: ${{ vars.SHEET_TAB || 'Games' }}
