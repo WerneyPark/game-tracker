@@ -9,6 +9,7 @@ import {
 } from "./src/psn.js";
 import { enrichHltb } from "./src/hltb.js";
 import {
+  parseSpreadsheetId,
   getSheetsClient,
   getSheetId,
   readSheet,
@@ -23,9 +24,10 @@ async function main() {
   const auth = await getAuth();
   const accountId = await resolveAccountId(auth, PSN_ONLINE_ID);
   const sheets = getSheetsClient();
+  const spreadsheetId = parseSpreadsheetId();
 
-  const { spreadsheetId, header, body, headerRow } = await readSheet(sheets);
   const sheetId = await getSheetId(sheets, spreadsheetId);
+  const { header, body, headerRow } = await readSheet(sheets, spreadsheetId);
   const knownHours = existingHoursMap(header, body);
 
   const games = await pullTrophyTitles(auth, accountId);

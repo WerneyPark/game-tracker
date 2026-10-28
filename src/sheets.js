@@ -23,9 +23,45 @@ import {
   coverFormula,
   restyleCover,
   colLetter,
+  parseSpreadsheetId,
 } from "./utils.js";
 
+export { parseSpreadsheetId };
+
 // ---- Google Sheets ----------------------------------------------------------
+
+function getServiceAccountEmail() {
+  try {
+    const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    return creds.client_email || "(unknown client_email)";
+  } catch {
+    return "(unknown client_email)";
+  }
+}
+
+function wrapSheetsError(err, spreadsheetId) {
+  const msg = err?.message || String(err);
+  const code = err?.code || err?.status || err?.response?.status;
+  if (code === 404 || /Requested entity was not found/i.test(msg)) {
+    const email = getServiceAccountEmail();
+    return new Error(
+      `Google Sheets API returned "Requested entity was not found" (404).\n` +
+        `  1. Check that SHEET_ID points to a valid native Google Sheet (not an uploaded .xlsx file).\n` +
+        `  2. In your Google Sheet, click Share and grant Editor access to your service account: ${email}\n` +
+        `  3. Ensure the Google Sheets API is enabled in your Google Cloud project.`
+    );
+  }
+  if (code === 403 || /permission/i.test(msg)) {
+    const email = getServiceAccountEmail();
+    return new Error(
+      `Google Sheets permission denied (403): ${msg}\n` +
+        `  Make sure your Google Sheet is shared (as Editor) with: ${email}\n` +
+        `  and that the Google Sheets API is enabled in your Google Cloud project.`
+    );
+  }
+  return err;
+}
+
 export function getSheetsClient() {
   let credentials;
   try {
@@ -43,11 +79,16 @@ export function getSheetsClient() {
   return google.sheets({ version: "v4", auth });
 }
 
-export async function getSheetId(sheets, spreadsheetId) {
-  const meta = await sheets.spreadsheets.get({
-    spreadsheetId,
-    fields: "sheets.properties(sheetId,title)",
-  });
+export async function getSheetId(sheets, spreadsheetId = parseSpreadsheetId()) {
+  let meta;
+  try {
+    meta = await sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: "sheets.properties(sheetId,title)",
+    });
+  } catch (err) {
+    throw wrapSheetsError(err, spreadsheetId);
+  }
   const found = (meta.data.sheets || []).find(
     (s) => s.properties.title === SHEET_TAB
   );
@@ -63,13 +104,17 @@ export async function getSheetId(sheets, spreadsheetId) {
   return at(found.properties.sheetId);
 }
 
-export async function readSheet(sheets) {
-  const spreadsheetId = process.env.SHEET_ID;
-  const read = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: SHEET_TAB,
-    valueRenderOption: "FORMULA",
-  });
+export async function readSheet(sheets, spreadsheetId = parseSpreadsheetId()) {
+  let read;
+  try {
+    read = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: SHEET_TAB,
+      valueRenderOption: "FORMULA",
+    });
+  } catch (err) {
+    throw wrapSheetsError(err, spreadsheetId);
+  }
   const rows = read.data.values || [];
   // A timestamp banner may sit above the header, so find the header by content
   // rather than assuming row 1. Sheets written by older versions have no banner.

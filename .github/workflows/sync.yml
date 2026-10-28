@@ -21,9 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # googleapis 180+ requires Node 22 or newer.
           node-version: 22
@@ -71,6 +71,10 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          if ! gh issue list --limit 1 >/dev/null 2>&1; then
+            echo "Issues are disabled on this repository (default on forks). Enable Issues under Settings > General > Features if you want failure issues filed automatically."
+            exit 0
+          fi
           title="PSN sync is failing"
           open=$(gh issue list --state open --search "in:title \"$title\"" \
                    --json number --jq '.[0].number // empty')

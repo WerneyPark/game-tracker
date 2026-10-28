@@ -185,3 +185,16 @@ export function colLetter(i) {
 }
 
 export const rgb = (r, g, b) => ({ red: r / 255, green: g / 255, blue: b / 255 });
+
+// Extract the spreadsheet ID even if the user pasted the full Google Sheets URL
+// (e.g. "https://docs.google.com/spreadsheets/d/1abc.../edit#gid=0") or wrapped
+// the secret in quotes/spaces.
+export function parseSpreadsheetId(raw = process.env.SHEET_ID) {
+  const cleaned = String(raw || "")
+    .trim()
+    .replace(/^["']+|["']+$/g, "")
+    .trim();
+  const urlMatch = /\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/.exec(cleaned);
+  return urlMatch ? urlMatch[1] : cleaned;
+}
+
